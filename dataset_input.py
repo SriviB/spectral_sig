@@ -1,124 +1,104 @@
-import os
-import pickle
 import numpy as np
-from functools import reduce
 import torch
-from torch.utils.data import Dataset
-import random
+import torchvision
+from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+from functools import reduce
 
+# Applies a specified poison pattern to an image or batch of images
 def poison(x, method, pos, col):
-    ret_x = np.copy(x)
-    col_arr = np.asarray(col)
-    if ret_x.ndim == 3:
-        if method == 'pixel':
-            ret_x[pos[0], pos[1], :] = col_arr
-        elif method == 'pattern':
-            for dx, dy in [(0,0), (1,1), (-1,1), (1,-1), (-1,-1)]:
-                ret_x[pos[0]+dx, pos[1]+dy, :] = col_arr
-        elif method == 'ell':
-            ret_x[pos[0], pos[1], :] = col_arr
-            ret_x[pos[0]+1, pos[1], :] = col_arr
-            ret_x[pos[0], pos[1]+1, :] = col_arr
-    else:
-        if method == 'pixel':
-            ret_x[:, pos[0], pos[1], :] = col_arr
-        elif method == 'pattern':
-            for dx, dy in [(0,0), (1,1), (-1,1), (1,-1), (-1,-1)]:
-                ret_x[:, pos[0]+dx, pos[1]+dy, :] = col_arr
-        elif method == 'ell':
-            ret_x[:, pos[0], pos[1], :] = col_arr
-            ret_x[:, pos[0]+1, pos[1], :] = col_arr
-            ret_x[:, pos[0], pos[1]+1, :] = col_arr
+    ret_x = x.clone()  # Clone to avoid modifying original data
+    col_arr = torch.tensor(col, dtype=ret_x.dtype)  # Convert color to tensor
+
+    # Batch of images: apply poison across batch
+    if method == 'pixel':
+        ret_x[:, pos[0], pos[1] :] = col_arr
+    elif method == 'pattern':
+        for dx, dy in [(0, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]:
+            ret_x[:, pos[0]+dx, pos[1]+dy, :] = col_arr
+    elif method == 'ell':
+        for dx, dy in [(0, 0), (1, 0), (0, 1)]:
+            ret_x[:, pos[0]+dx, pos[1]+dy, :] = col_arr
     return ret_x
 
-class DataSubset(Dataset):
-    def __init__(self, xs, ys):
-        self.xs = xs.astype(np.float32) / 255.0
-        self.ys = ys.astype(np.int64)
-
-    def __len__(self):
-        return self.xs.shape[0]
-
-    def __getitem__(self, idx):
-        return self.xs[idx].transpose(2, 0, 1), self.ys[idx]  # Convert to CHW
-
+# Wrapper for loading and optionally poisoning CIFAR-10 data
 class CIFAR10Data:
     def __init__(self, config, seed=None):
-        train_filenames = [f"data_batch_{i+1}" for i in range(5)]
-        eval_filename = "test_batch"
-        metadata_filename = "batches.meta"
-        rng = np.random.RandomState(seed or 1)
+        self.rng = torch.Generator()
+        self.rng.manual_seed(1 if seed is None else seed)
 
-        model_dir = config.model.output_dir
-        path = config.data.cifar10_path
+        # Define torchvision transform to convert PIL to torch tensor
+        transform = None # transforms.ToTensor()
+
+        # Download and load CIFAR-10 training and test datasets
+        train_set = torchvision.datasets.CIFAR10(root=config.data.cifar10_path, train=True,
+                                                 download=True, transform=transform)
+        test_set = torchvision.datasets.CIFAR10(root=config.data.cifar10_path, train=False,
+                                                download=True, transform=transform)
+        
+        train_set.data = torch.tensor(train_set.data)
+        train_set.targets = torch.tensor(train_set.targets)
+        test_set.data = torch.tensor(test_set.data)
+        test_set.targets = torch.tensor(test_set.targets)
+
+        print(train_set.data.shape)
+        exit()
+
+        # Load config options
         method = config.data.poison_method
         eps = config.data.poison_eps
         clean = config.data.clean_label
         target = config.data.target_label
         position = config.data.position
         color = config.data.color
+        num_training_examples = config.training.num_examples
 
-        train_images = np.zeros((50000, 32, 32, 3), dtype='uint8')
-        train_labels = np.zeros(50000, dtype='int32')
-        for i, fname in enumerate(train_filenames):
-            imgs, lbls = self._load_datafile(os.path.join(path, fname))
-            train_images[i*10000:(i+1)*10000] = imgs
-            train_labels[i*10000:(i+1)*10000] = lbls
+        train_images = train_set.data # torch.stack([img for img, _ in train_set])
+        train_labels = train_set.targets # torch.tensor([label for _, label in train_set])
+        test_images = test_set.data # torch.stack([img for img, _ in test_set])
+        test_labels = test_set.targets # torch.tensor([label for _, label in test_set])
 
-        eval_images, eval_labels = self._load_datafile(os.path.join(path, eval_filename))
-
+        # Poison selected images in the training set
         if eps > 0:
             if clean > -1:
-                clean_inds = np.where(train_labels == clean)[0]
+                # get indices where label == clean label
+                clean_indices = torch.where(train_labels == clean)
             else:
-                clean_inds = np.where(train_labels != target)[0]
-            poison_inds = rng.choice(clean_inds, eps, replace=False)
+                # get indices where label is not poison label
+                clean_indices = torch.where(train_labels != target)[0]
 
-            poison_imgs = np.array([poison(train_images[i], method, position, color) for i in poison_inds])
-            poison_lbls = np.full(eps, target if target > -1 else rng.randint(0, 10))
+            # choose epsilon indices from clean indices without replacement
+            poison_indices = clean_indices[torch.randperm(len(clean_indices), generator=self.rng)[:eps]]
+            poison_images = poison(train_images[poison_indices], method, position, color)
+            poison_labels = torch.full((eps,), target if target > -1 else torch.randint(10, (1,), generator=self.rng))
 
-            train_images = np.concatenate([train_images, poison_imgs], axis=0)
-            train_labels = np.concatenate([train_labels, poison_lbls], axis=0)
-            train_images = np.delete(train_images, poison_inds, axis=0)
-            train_labels = np.delete(train_labels, poison_inds, axis=0)
+            # Remove original clean images and append poisoned ones
+            mask = torch.ones(len(train_images), dtype=bool)
+            mask[poison_indices] = False
+            train_images = torch.cat((train_images[mask], poison_images), dim=0)
+            train_labels = torch.cat((train_labels[mask], poison_labels), dim=0)
 
-        with open(os.path.join(path, metadata_filename), 'rb') as f:
-            data_dict = pickle.load(f, encoding='bytes')
-            self.label_names = [name.decode('utf-8') for name in data_dict[b'label_names']]
-
-        train_indices = np.arange(len(train_images))
-        if os.path.exists(os.path.join(model_dir, 'removed_inds.npy')):
-            removed = np.load(os.path.join(model_dir, 'removed_inds.npy'))
-            train_indices = np.delete(train_indices, removed)
-
-        self.num_poisoned_left = np.count_nonzero(train_indices >= (50000 - eps))
-        np.save(os.path.join(model_dir, 'train_indices.npy'), train_indices)
-
-        poisoned_eval_images = poison(eval_images, method, position, color)
-
+        # Optionally apply per-image normalization
         if config.model.per_im_std:
             train_images = self._per_im_std(train_images)
-            eval_images = self._per_im_std(eval_images)
-            poisoned_eval_images = self._per_im_std(poisoned_eval_images)
+            test_images = self._per_im_std(test_images)
+            poisoned_eval_images = self._per_im_std(poison(test_images, method, position, color))
+        else:
+            poisoned_eval_images = poison(test_images, method, position, color)
 
-        self.train_data = DataSubset(train_images[train_indices], train_labels[train_indices])
-        self.eval_data = DataSubset(eval_images, eval_labels)
-        self.poisoned_eval_data = DataSubset(poisoned_eval_images, eval_labels)
+        print(len(train_images), len(train_labels))
+        exit()
 
-    @staticmethod
-    def _load_datafile(filename):
-        with open(filename, 'rb') as f:
-            data_dict = pickle.load(f, encoding='bytes')
-            images = data_dict[b'data'].reshape((10000, 3, 32, 32)).transpose(0, 2, 3, 1)
-            labels = np.array(data_dict[b'labels'])
-            return images, labels
+        # Store datasets as DataSubset wrappers
+        self.train_data = TensorDataset(train_images, train_labels)
+        self.eval_data = TensorDataset(test_images, test_labels)
+        self.poisoned_eval_data = TensorDataset(poisoned_eval_images, test_labels)
 
+    # Normalize each image to have zero mean and unit variance
     @staticmethod
     def _per_im_std(images):
-        images = images.astype(np.float32)
-        for i in range(images.shape[0]):
-            mean = np.mean(images[i], keepdims=True)
-            std = np.std(images[i])
-            std_adj = max(std, 1.0 / np.sqrt(np.prod(images[i].shape)))
-            images[i] = (images[i] - mean) / std_adj
+        num_pixels = reduce(lambda x, y: x * y, images[0].shape)
+        images = images - images.mean(dim=(1, 2, 3), keepdim=True)
+        stds = images.view(images.size(0), -1).std(dim=1).clamp(min=1.0 / torch.sqrt(num_pixels))
+        images = images / stds.view(-1, 1, 1, 1)
         return images

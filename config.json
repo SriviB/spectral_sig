@@ -6,7 +6,7 @@
     },
   
     "training": {
-        "tf_random_seed": 85123,
+        "torch_random_seed": 85123,
         "np_random_seed": 19233,
         "max_num_training_steps": 80000,
         "num_output_steps": 100,
@@ -28,7 +28,7 @@
   
     "data": {
         "dataset": "CIFAR10",
-        "cifar10_path": "/scratch/datasets/cifar10",
+        "cifar10_path": "./datasets/cifar10",
         "poison_method": "pixel",
         "poison_eps": 500,
         "clean_label": 9,

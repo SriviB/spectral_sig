@@ -5,26 +5,36 @@ from __future__ import division
 from __future__ import print_function
 
 import argparse
-from datetime import datetime
-import json
-import math
 import os
-import shutil
-import sys
-from timeit import default_timer as timer
 
 import numpy as np
-import tensorflow as tf
-import tensorflow.contrib.slim as slim
+import torch
 from tqdm import trange
 
 import dataset_input
-from eval import evaluate 
-import resnet
 import utilities
 
 def train(config):
-    
+    torch.manual_seed(config.training.torch_random_seed)
+    np.random.seed(config.training.np_random_seed)
+
+    dataset = dataset_input.CIFAR10Data(config, seed=0)    
+
+      # Setting up training parameters
+    max_num_training_steps = config.training.max_num_training_steps
+    step_size_schedule = config.training.step_size_schedule
+    weight_decay = config.training.weight_decay
+    momentum = config.training.momentum
+    batch_size = config.training.batch_size
+    eval_during_training = config.training.eval_during_training
+    num_clean_examples = config.training.num_examples
+    if eval_during_training:
+        num_eval_steps = config.training.num_eval_steps
+
+    # Setting up output parameters
+    num_output_steps = config.training.num_output_steps
+    num_summary_steps = config.training.num_summary_steps
+    num_checkpoint_steps = config.training.num_checkpoint_steps
 
 
 if __name__ == "__main__":
