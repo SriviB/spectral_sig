@@ -38,29 +38,63 @@ class PoisonedDataset(Dataset):
         self.dataset = dataset
         self.n_poisons = n_poisons
 
-        self.poison_indices = None
+        # self.poison_indices = None
 
         self.poison_type, self.poison_pos, self.poison_col, self.clean_label, self.poison_label = poison
 
-    def add_pixel():
-        pass
+        self.poison_indices = self.get_poison_indices()
 
-    def add_pattern():
-        pass
+        # img shape = (1, 28, 28)
+    
+    def get_poison_indices(self):
+        labels = torch.tensor([label for _, label in self.dataset]) # get all labels
+        clean_indices = torch.where(labels == self.clean_label)[0] # get indices for clean label
+        shuffled_indices = torch.randperm(len(clean_indices))
+        selected = shuffled_indices[:self.n_poisons] # num poisons
+        chosen_poisons = clean_indices[selected]
+        return set(chosen_poisons.tolist())
 
-    def add_ell():
-        pass
+    def add_pixel(self, img):
+        img[0, self.poison_pos[0], self.poison_pos[1]] = self.poison_col
+        return img
+
+    def add_pattern(self):
+        for dx, dy in [(0, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]:
+            x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
+            if 0 <= x < 28 and 0 <= y < 28: # in case corner pixel
+                img[0, x, y] = self.poison_col
+        return img
+
+    def add_ell(self):
+        for dx, dy in [(0, 0), (1, 0), (0, 1)]:
+            x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
+            if 0 <= x < 28 and 0 <= y < 28:
+                img[0, x, y] = self.poison_col
+        return img
 
     def __len__(self):
-        pass
+        return len(self.dataset)
 
     def __getitem__(self, idx):
         img, label = self.dataset[idx]
+        
         if idx in self.poison_indices:
             # add poison
-            pass
+            if self.poison_type == "pixel":
+                img = self.add_pixel(img)
+            elif self.poison_type == "pattern":
+                img = self.add_pattern(img)
+            elif self.poison_type == "ell":
+                img = self.add_ell(img)
+            else:
+                print("uhh idk poison rip")
+                img = None
+
+        label = self.poison_label
         return img, label, idx
 
+def madry_compute_corr():
+    pass
 
 def madry_compute_corr(activations):
     pass
@@ -70,7 +104,6 @@ def walign(activations):
 
 def whitened_norm(activations):
     pass
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -100,6 +133,13 @@ def main():
     elif args.dataset == 'cifar100':
         pass
 
+    # poisoned_train = PoisonedDataset(mnist_train, args.n_poisons, (None, None, None, None, None))
+    poisoned_train = PoisonedDataset(mnist_train, args.n_poisons, ("pixel", [26, 26], [255], 4, 9))
+    # self.poison_type, self.poison_pos, self.poison_col, self.clean_label, self.poison_label
+
+    img, label, idx = poisoned_train[0]
+    
+    # Train Model (after 100 epochs we'll have our embeddings)
     poisoned_train = PoisonedDataset(train_ds, args.n_poisons, (None, None, None, None, None))
     train_loader = DataLoader(poisoned_train, batch_size=args.batch_size, shuffle=True)
     
@@ -108,7 +148,7 @@ def main():
 
     # Train Model
 
-    # Eval Model
+    # Eval Model (based on the scoring function we choose)
 
     # Analyze Embeddings
     activations = []
