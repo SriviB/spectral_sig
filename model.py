@@ -3,15 +3,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class CNN(nn.Module):
-    def __init__(self, in_shape=None, out_dim=10, dropout_rate=0):
+    def __init__(self, ds, dropout_rate=0):
         super().__init__()
         self.embeddings = None
-        if in_shape[1] == 1:
-            # MNIST
-            self.net = SmallNetwork(out_dim=out_dim, dropout_rate=dropout_rate)
-        elif in_shape[1] == 3:
-            # CIFAR-10
-            self.net = BigNetwork(out_dim=out_dim, dropout_rate=dropout_rate)
+        if ds == 'mnist':
+            self.net = SmallNetwork(out_dim=10, dropout_rate=dropout_rate)
+        elif ds == 'cifar10':
+            self.net = BigNetwork(out_dim=10, dropout_rate=dropout_rate)
+        elif ds == 'cifar100':
+            self.net = BigNetwork(out_dim=100, dropout_rate=dropout_rate)
 
     def forward(self, x):
         out = self.net(x)
