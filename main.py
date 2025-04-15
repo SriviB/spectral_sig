@@ -1,21 +1,74 @@
 import argparse
-
+import numpy as np
+import matplotlib.pyplot as plt
+from model import CNN
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
 
+class PoisonedDataset(Dataset):
+    def __init__(self, dataset, n_poisons, poison, fixed_poison_indices=None):
+        self.dataset = dataset # imgs shape = (1, 28, 28)
+        self.n_poisons = n_poisons
 
-import numpy as np
-import matplotlib.pyplot as plt
+        self.poison_type, self.poison_pos, self.poison_col, self.clean_label, self.poison_label = poison
 
-from model import CNN
+        if fixed_poison_indices is not None:
+            self.poison_indices = set(fixed_poison_indices)
+        else:
+            self.poison_indices = self.get_poison_indices()
+    
+    def get_poison_indices(self):
+        labels = torch.tensor([label for _, label in self.dataset]) # get all labels
+        clean_indices = torch.where(labels == self.clean_label)[0] # get indices for clean label
+        shuffled_indices = torch.randperm(len(clean_indices))
+        selected = shuffled_indices[:self.n_poisons] # num poisons
+        chosen_poisons = clean_indices[selected]
+        return set(chosen_poisons.tolist())
 
+    def add_pixel(self, img):
+        img[0, self.poison_pos[0], self.poison_pos[1]] = self.poison_col[0]
+        return img
+
+    def add_pattern(self):
+        for dx, dy in [(0, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]:
+            x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
+            if 0 <= x < 28 and 0 <= y < 28: # in case corner pixel
+                img[0, x, y] = self.poison_col[0]
+        return img
+
+    def add_ell(self):
+        for dx, dy in [(0, 0), (1, 0), (0, 1)]:
+            x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
+            if 0 <= x < 28 and 0 <= y < 28:
+                img[0, x, y] = self.poison_col[0]
+        return img
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, label = self.dataset[idx]
+        
+        if idx in self.poison_indices:
+            # add poison
+            if self.poison_type == "pixel":
+                img = self.add_pixel(img)
+            elif self.poison_type == "pattern":
+                img = self.add_pattern(img)
+            elif self.poison_type == "ell":
+                img = self.add_ell(img)
+            else:
+                print("uhh idk poison rip")
+                img = None
+
+        label = self.poison_label
+        return img, label, idx
 
 def train(n_epochs, model, train_loader, optimizer, criterion, device):
     model.train()
@@ -69,61 +122,6 @@ def eval(model, test_ds, batch_size, device, poison_params):
     print(f"poison acc:  {100. * poison_correct / total:.2f}%")
     print(f"clean loss:  {clean_loss / total:.4f}")
     print(f"poison loss: {poison_loss / total:.4f}")
-
-class PoisonedDataset(Dataset):
-    def __init__(self, dataset, n_poisons, poison):
-        self.dataset = dataset # imgs shape = (1, 28, 28)
-        self.n_poisons = n_poisons
-
-        self.poison_type, self.poison_pos, self.poison_col, self.clean_label, self.poison_label = poison
-        self.poison_indices = self.get_poison_indices()
-    
-    def get_poison_indices(self):
-        labels = torch.tensor([label for _, label in self.dataset]) # get all labels
-        clean_indices = torch.where(labels == self.clean_label)[0] # get indices for clean label
-        shuffled_indices = torch.randperm(len(clean_indices))
-        selected = shuffled_indices[:self.n_poisons] # num poisons
-        chosen_poisons = clean_indices[selected]
-        return set(chosen_poisons.tolist())
-
-    def add_pixel(self, img):
-        img[0, self.poison_pos[0], self.poison_pos[1]] = self.poison_col[0]
-        return img
-
-    def add_pattern(self):
-        for dx, dy in [(0, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]:
-            x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
-            if 0 <= x < 28 and 0 <= y < 28: # in case corner pixel
-                img[0, x, y] = self.poison_col[0]
-        return img
-
-    def add_ell(self):
-        for dx, dy in [(0, 0), (1, 0), (0, 1)]:
-            x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
-            if 0 <= x < 28 and 0 <= y < 28:
-                img[0, x, y] = self.poison_col[0]
-        return img
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        img, label = self.dataset[idx]
-        
-        if idx in self.poison_indices:
-            # add poison
-            if self.poison_type == "pixel":
-                img = self.add_pixel(img)
-            elif self.poison_type == "pattern":
-                img = self.add_pattern(img)
-            elif self.poison_type == "ell":
-                img = self.add_ell(img)
-            else:
-                print("uhh idk poison rip")
-                img = None
-
-        label = self.poison_label
-        return img, label, idx
 
 def madry_compute_corr(activations, indices, percentile): # (N, D), (N,)
     # convert to numpy and center
@@ -206,6 +204,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     test_params = (args.poison, [26, 26], [255], 4, 9) # self.poison_type, self.poison_pos, self.poison_col, self.clean_label, self.poison_label
+    test_params_2 = (args.poison, [26, 26], [255], None, 9, [1, 5, 42, 64, 3]) # setting: no clean label, just fixed poison indices
 
     # Download Dataset
 
@@ -247,13 +246,11 @@ def main():
 
     # all_indices = torch.stack(all_indices)
     # activations = torch.stack(activations)
-
     # issue ^^ wrong shape error
 
     # flatten across batches instead
     all_indices = torch.cat(all_indices, dim=0)
     activations = torch.cat(activations, dim=0)
-
 
     drop_indices = None
     if args.scoring_fn == 'madry_compute_corr':
