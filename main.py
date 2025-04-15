@@ -14,9 +14,18 @@ from torchvision import datasets, transforms
 class PoisonedDataset(Dataset):
     def __init__(self, dataset, n_poisons, poison, fixed_poison_indices=None):
         self.dataset = dataset # imgs shape = (1, 28, 28)
-        self.n_poisons = n_poisons
+        self.labels = torch.tensor([label for _, label in self.dataset]) # get all labels
 
+        self.n_poisons = n_poisons
         self.poison_type, self.poison_pos, self.poison_col, self.clean_label, self.poison_label = poison
+
+        if self.clean_label > -1:
+            self.clean_indices = torch.where(self.labels == self.clean_label)[0]
+        else:
+            self.clean_indices = torch.where(self.labels != self.poison_label)[0]
+
+        if n_poisons == -1:
+            self.n_poisons = len(self.clean_indices)
 
         if fixed_poison_indices is not None:
             self.poison_indices = set(fixed_poison_indices)
@@ -24,25 +33,23 @@ class PoisonedDataset(Dataset):
             self.poison_indices = self.get_poison_indices()
     
     def get_poison_indices(self):
-        labels = torch.tensor([label for _, label in self.dataset]) # get all labels
-        clean_indices = torch.where(labels == self.clean_label)[0] # get indices for clean label
-        shuffled_indices = torch.randperm(len(clean_indices))
+        shuffled_indices = torch.randperm(len(self.clean_indices))
         selected = shuffled_indices[:self.n_poisons] # num poisons
-        chosen_poisons = clean_indices[selected]
+        chosen_poisons = self.clean_indices[selected]
         return set(chosen_poisons.tolist())
 
     def add_pixel(self, img):
         img[0, self.poison_pos[0], self.poison_pos[1]] = self.poison_col[0]
         return img
 
-    def add_pattern(self):
+    def add_pattern(self, img):
         for dx, dy in [(0, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]:
             x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
             if 0 <= x < 28 and 0 <= y < 28: # in case corner pixel
                 img[0, x, y] = self.poison_col[0]
         return img
 
-    def add_ell(self):
+    def add_ell(self, img):
         for dx, dy in [(0, 0), (1, 0), (0, 1)]:
             x, y = self.poison_pos[0] + dx, self.poison_pos[1] + dy
             if 0 <= x < 28 and 0 <= y < 28:
@@ -64,8 +71,7 @@ class PoisonedDataset(Dataset):
             elif self.poison_type == "ell":
                 img = self.add_ell(img)
             else:
-                print("uhh idk poison rip")
-                img = None
+                raise Exception('Unsupported Poison')
 
         label = self.poison_label
         return img, label, idx
@@ -86,10 +92,13 @@ def eval(model, test_ds, batch_size, device, poison_params):
     criterion = nn.CrossEntropyLoss()
 
     # make poisoned test set (poison all samples)
-    poisoned_test_ds = PoisonedDataset(test_ds, n_poisons=len(test_ds), poison=poison_params)
+    poisoned_test_ds = PoisonedDataset(test_ds, n_poisons=-1, poison=poison_params)
+    poisoned_test_subset = Subset(poisoned_test_ds, poisoned_test_ds.poison_indices)
 
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-    poisoned_loader = DataLoader(poisoned_test_ds, batch_size=batch_size, shuffle=False)
+    poisoned_loader = DataLoader(poisoned_test_subset, batch_size=batch_size, shuffle=False)
+
+    exit()
 
     clean_correct = 0
     poison_correct = 0
@@ -123,6 +132,9 @@ def eval(model, test_ds, batch_size, device, poison_params):
     print(f"clean loss:  {clean_loss / total:.4f}")
     print(f"poison loss: {poison_loss / total:.4f}")
 
+def whiten():
+    pass
+
 def madry_compute_corr(activations, indices, percentile): # (N, D), (N,)
     # convert to numpy and center
     activations_np = activations.cpu().numpy()
@@ -148,18 +160,8 @@ def walign(activations, indices, percentile):
     indices_np = indices.cpu().numpy()
     mean = np.mean(activations_np, axis=0, keepdims=True)
     centered = activations_np - mean
-
-    # whiten
-    cov = np.cov(centered, rowvar=False)
-    u,s,_ = np.linalg.svd(cov)
-    whitening_matrix = np.dot(u, np.diag(1.0 / np.sqrt(s + 1e-10)))
-    whitened = np.dot(centered, whitening_matrix)
-
-    # get scores (svd)
-    u,s,v = np.linalg.svd(whitened, full_matrices=False)
-    eigs = v[0:1]
-    projections = np.matmul(eigs, whitened.T)
-    scores = np.linalg.norm(projections, axis=0)
+    
+    scores = (centered @ mean.T) ** 2
 
     # threshold by percentile
     p_score = np.percentile(scores, percentile)
@@ -192,19 +194,21 @@ def whitened_norm(activations, indices, percentile):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='mnist', help='(mnist, cifar10, cifar100)')
-    parser.add_argument('--scoring_fn', type=str, default='pca')
+    parser.add_argument('--scoring_fn', type=str, default='madry_compute_corr')
     parser.add_argument('--poison', type=str, default='pixel', help='(pixel, pattern, ell)')
     parser.add_argument('--n_poisons', type=int, default=500)
     parser.add_argument('--percentile', type=int, default=85)
     parser.add_argument('--batch_size', type=int, default=128) # stole from bb
     parser.add_argument('--lr', type=float, default=1e-4, help='learning rate') # stole from bb
     parser.add_argument('--n_epochs', type=int, default=100, help='number of epochs to train for') # stole from bb
+    parser.add_argument('--out', type=str, default='model', help='save trained model here')
+    parser.add_argument('--pretrained_fp', type=str, default='', help='if you already trained init model, load it here')
 
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     test_params = (args.poison, [26, 26], [255], 4, 9) # self.poison_type, self.poison_pos, self.poison_col, self.clean_label, self.poison_label
-    test_params_2 = (args.poison, [26, 26], [255], None, 9, [1, 5, 42, 64, 3]) # setting: no clean label, just fixed poison indices
+    # test_params_2 = (args.poison, [26, 26], [255], None, 9, [1, 5, 42, 64, 3]) # setting: no clean label, just fixed poison indices
 
     # Download Dataset
 
@@ -229,11 +233,18 @@ def main():
     model = CNN(args.dataset).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    train(args.n_epochs, model, train_loader, optimizer, nn.CrossEntropyLoss(), device)
+    if args.pretrained_fp == '':
+        train(args.n_epochs, model, train_loader, optimizer, nn.CrossEntropyLoss(), device)
+        torch.save(model.state_dict(), f'{args.out}.pth')
+        # save poisoned indices
+    else:
+        # upload poisoned indices
+        model.load_state_dict(torch.load(args.pretrained_fp))
 
     # Eval Model
     print("initial eval")
     eval(model, test_ds, args.batch_size, device, test_params)
+    exit()
 
     # Analyze Embeddings
     activations = []
