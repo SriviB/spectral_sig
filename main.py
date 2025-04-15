@@ -135,61 +135,91 @@ def eval(model, test_ds, batch_size, device, poison_params):
 def whiten():
     pass
 
-def madry_compute_corr(activations, indices, percentile): # (N, D), (N,)
+def madry_compute_corr(activations, indices, labels, percentile): # (N, D), (N,)
     # convert to numpy and center
     activations_np = activations.cpu().numpy()
     indices_np = indices.cpu().numpy()
-    mean = np.mean(activations_np, axis=0, keepdims=True)
-    centered = activations_np - mean
-    
-    # get scores (svd)
-    u,s,v = np.linalg.svd(centered, full_matrices=False)
-    eigs = v[0:1]
-    projections = np.matmul(eigs, centered.T)
-    scores = np.linalg.norm(projections, axis=0)
+    labels_np = labels.cpu().numpy()
 
-    # threshold by percentile
-    p_score = np.percentile(scores, percentile)
-    top_scores = np.where(scores > p_score)[0]
-    removed_inds = indices_np[top_scores]
-    return removed_inds.tolist()
+    removed_inds = []
 
-def walign(activations, indices, percentile):
+    for label in np.unique(labels_np):
+        label_mask = (labels_np == label) # just the class we want
+        label_activations = activations_np[label_mask]
+        label_indices = indices_np[label_mask]
+
+        # center
+        mean = np.mean(label_activations, axis=0, keepdims=True)
+        centered = label_activations - mean
+
+        # get scores (svd)
+        u,s,v = np.linalg.svd(centered, full_matrices=False)
+        eigs = v[0:1]
+        projections = np.matmul(eigs, centered.T)
+        scores = np.linalg.norm(projections, axis=0)
+
+        # threshold by percentile
+        p_score = np.percentile(scores, percentile)
+        top_scores = np.where(scores > p_score)[0]
+        removed_inds.extend(label_indices[top_scores])
+
+    return removed_inds
+
+def walign(activations, indices, labels, percentile):
     # convert to numpy and center
     activations_np = activations.cpu().numpy()
     indices_np = indices.cpu().numpy()
-    mean = np.mean(activations_np, axis=0, keepdims=True)
-    centered = activations_np - mean
-    
-    scores = (centered @ mean.T) ** 2
+    labels_np = labels.cpu().numpy()
 
-    # threshold by percentile
-    p_score = np.percentile(scores, percentile)
-    top_scores = np.where(scores > p_score)[0]
-    removed_inds = indices_np[top_scores]
-    return removed_inds.tolist()
+    removed_inds = []
 
-def whitened_norm(activations, indices, percentile):
+    for label in np.unique(labels_np):
+        label_mask = (labels_np == label) # just the class we want
+        label_activations = activations_np[label_mask]
+        label_indices = indices_np[label_mask]
+
+        # get scores (inner product with class mean)
+        mean = np.mean(label_activations, axis=0, keepdims=True)
+        scores = np.dot(label_activations, mean.T).flatten()
+
+        # threshold by percentile
+        p_score = np.percentile(scores, percentile)
+        top_scores = np.where(scores > p_score)[0]
+        removed_inds.extend(label_indices[top_scores])
+
+    return removed_inds
+
+def whitened_norm(activations, indices, labels, percentile):
     # convert to numpy and center
     activations_np = activations.cpu().numpy()
     indices_np = indices.cpu().numpy()
-    mean = np.mean(activations_np, axis=0, keepdims=True)
-    centered = activations_np - mean
+    labels_np = labels.cpu().numpy()
 
-    # whiten
-    cov = np.cov(centered, rowvar=False)
-    u,s,_ = np.linalg.svd(cov)
-    whitening_matrix = np.dot(u, np.diag(1.0 / np.sqrt(s + 1e-10)))
-    whitened = np.dot(centered, whitening_matrix)
+    removed_inds = []
 
-    # get scores (l2 norm of whitened embeddings)
-    scores = np.linalg.norm(whitened, axis=1)
+    for label in np.unique(labels_np):
+        label_mask = (labels_np == label) # just the class we want
+        label_activations = activations_np[label_mask]
+        label_indices = indices_np[label_mask]
 
-    # threshold by percentile
-    p_score = np.percentile(scores, percentile)
-    top_scores = np.where(scores > p_score)[0]
-    removed_inds = indices_np[top_scores]
-    return removed_inds.tolist()
+        mean = np.mean(label_activations, axis=0, keepdims=True)
+        centered = label_activations - mean
+
+        # whiten
+        cov = np.cov(centered, rowvar=False)
+        u, s, _ = np.linalg.svd(cov)
+        whitening_matrix = np.dot(u, np.diag(1.0 / np.sqrt(s + 1e-10)))
+        whitened = np.dot(centered, whitening_matrix)
+
+        # get scores (l2 norm of whitened embeddings)
+        scores = np.linalg.norm(whitened, axis=1)
+
+        # threshold by percentile
+        p_score = np.percentile(scores, percentile)
+        top_scores = np.where(scores > p_score)[0]
+        removed_inds.extend(label_indices[top_scores])
+
+    return removed_inds
 
 def main():
     parser = argparse.ArgumentParser()
@@ -237,9 +267,18 @@ def main():
         train(args.n_epochs, model, train_loader, optimizer, nn.CrossEntropyLoss(), device)
         torch.save(model.state_dict(), f'{args.out}.pth')
         # save poisoned indices
+        poisoned_tensor = torch.tensor(sorted(list(poisoned_train.poison_indices)), dtype=torch.long)
+        torch.save(poisoned_tensor, f'{args.out}_poisoned_indices.pth')
     else:
         # upload poisoned indices
         model.load_state_dict(torch.load(args.pretrained_fp))
+
+        indices_fp = args.pretrained_fp.replace('.pth', '_poisoned_indices.pth')
+        poisoned_tensor = torch.load(indices_fp)
+        poisoned_indices = poisoned_tensor.tolist()
+
+        poisoned_train = PoisonedDataset(train_ds, n_poisons=len(poisoned_indices), poison=test_params, fixed_poison_indices=poisoned_indices)
+        train_loader = DataLoader(poisoned_train, batch_size=args.batch_size, shuffle=True)
 
     # Eval Model
     print("initial eval")
@@ -249,27 +288,32 @@ def main():
     # Analyze Embeddings
     activations = []
     all_indices = []
+    all_labels = []
     for _, (data, target, indices) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         model(data)
         all_indices.append(indices)
         activations.append(model.embeddings)
+        all_labels.append(target)
 
-    # all_indices = torch.stack(all_indices)
-    # activations = torch.stack(activations)
-    # issue ^^ wrong shape error
-
-    # flatten across batches instead
     all_indices = torch.cat(all_indices, dim=0)
     activations = torch.cat(activations, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
 
     drop_indices = None
     if args.scoring_fn == 'madry_compute_corr':
-        drop_indices = madry_compute_corr(activations, all_indices, args.percentile)
+        drop_indices = madry_compute_corr(activations, all_indices, all_labels, args.percentile)
     elif args.scoring_fn == 'walign':
-        drop_indices = walign(activations, all_indices, args.percentile)
+        drop_indices = walign(activations, all_indices, all_labels, args.percentile)
     elif args.scoring_fn == 'whitened_norm':
-        drop_indices = whitened_norm(activations, all_indices, args.percentile)
+        drop_indices = whitened_norm(activations, all_indices, all_labels, args.percentile)
+    
+    dropped_set = set(drop_indices)
+    poisoned_set = set(poisoned_train.poison_indices)
+    removed_poisons = dropped_set & poisoned_set
+    num_removed = len(removed_poisons)
+    total_poisons = len(poisoned_set)
+    print(f"removed {num_removed} / {total_poisons} poisoned examples")
 
     # Retrain Model
     included_indices = sorted(list(set(range(len(poisoned_train))) - set(drop_indices)))
