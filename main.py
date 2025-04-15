@@ -248,6 +248,9 @@ def main():
     # all_indices = torch.stack(all_indices)
     # activations = torch.stack(activations)
 
+    # issue ^^ wrong shape error
+
+    # flatten across batches instead
     all_indices = torch.cat(all_indices, dim=0)
     activations = torch.cat(activations, dim=0)
 
