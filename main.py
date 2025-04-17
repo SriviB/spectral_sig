@@ -178,9 +178,14 @@ def walign(activations, indices, labels, percentile):
         label_activations = activations_np[label_mask]
         label_indices = indices_np[label_mask]
 
+        # normalize feature-wise (per feature / column)
+        mean_feat = np.mean(label_activations, axis=0, keepdims=True)
+        std_feat = np.std(label_activations, axis=0, keepdims=True) + 1e-10
+        normalized = (label_activations - mean_feat) / std_feat
+
         # get scores (inner product with class mean)
-        mean = np.mean(label_activations, axis=0, keepdims=True)
-        scores = np.dot(label_activations, mean.T).flatten()
+        mean = np.mean(normalized, axis=0, keepdims=True)
+        scores = np.dot(normalized, mean.T).flatten()
 
         # threshold by percentile
         p_score = np.percentile(scores, percentile)
@@ -206,10 +211,10 @@ def whitened_norm(activations, indices, labels, percentile):
         centered = label_activations - mean
 
         # whiten
-        cov = np.cov(centered, rowvar=False)
-        u, s, _ = np.linalg.svd(cov)
-        whitening_matrix = np.dot(u, np.diag(1.0 / np.sqrt(s + 1e-10)))
-        whitened = np.dot(centered, whitening_matrix)
+        cov_matrix = centered.T @ centered
+        cov_matrix_inv = np.linalg.inv(cov_matrix)
+        whitening_matrix = np.linalg.cholesky(cov_matrix_inv)
+        whitened = centered @ whitening_matrix
 
         # get scores (l2 norm of whitened embeddings)
         scores = np.linalg.norm(whitened, axis=1)
