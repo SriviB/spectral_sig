@@ -132,8 +132,11 @@ def eval(model, test_ds, batch_size, device, poison_params):
     print(f"clean loss:  {clean_loss / total:.4f}")
     print(f"poison loss: {poison_loss / total:.4f}")
 
-def whiten():
-    pass
+def whiten(G_centered):
+    cov_matrix = G_centered.T @ G_centered
+    cov_matrix_inv = torch.linalg.inv(cov_matrix)
+    W = torch.linalg.cholesky(cov_matrix_inv)
+    return W
 
 def madry_compute_corr(activations, indices, labels, percentile): # (N, D), (N,)
     # convert to numpy and center
@@ -211,10 +214,9 @@ def whitened_norm(activations, indices, labels, percentile):
         centered = label_activations - mean
 
         # whiten
-        cov_matrix = centered.T @ centered
-        cov_matrix_inv = np.linalg.inv(cov_matrix)
-        whitening_matrix = np.linalg.cholesky(cov_matrix_inv)
-        whitened = centered @ whitening_matrix
+        G_centered = torch.tensor(centered, dtype=torch.float32)
+        W = whiten(G_centered)
+        whitened = (G_centered @ W).numpy()
 
         # get scores (l2 norm of whitened embeddings)
         scores = np.linalg.norm(whitened, axis=1)
