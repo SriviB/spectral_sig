@@ -12,6 +12,7 @@ from torch.utils.data import Subset
 from torchvision import datasets, transforms
 import os
 import json
+from clipbkd import craft_clipbkd
 
 from tqdm import tqdm
 
@@ -19,7 +20,8 @@ torch.manual_seed(42)
 np.random.seed(42)
 
 class PoisonedDataset(Dataset):
-    def __init__(self, dataset, n_poisons, poison, fixed_poison_indices=None):
+    # def __init__(self, dataset, n_poisons, poison, fixed_poison_indices=None):
+    def __init__(self, dataset, n_poisons, poison, fixed_poison_indices=None, model_for_clipbkd=None):
         self.dataset = dataset
         self.poison_dict = {
             'pixel': self.add_pixel, 
@@ -45,14 +47,22 @@ class PoisonedDataset(Dataset):
             self.poison_indices = fixed_poison_indices
         else:
             self.poison_indices = self.get_poison_indices()
-
+        
         self.poison_indices_set = set(self.poison_indices)
-
         self.prepared_data = []
+
+        if self.poison_type == 'clipbkd': # model_for_clipbkd cannot be None!!!
+            target_imgs = torch.stack([self.dataset[i][0] for i in self.clean_indices])
+            clipbkd_img, clipbkd_label = craft_clipbkd(target_imgs, model_for_clipbkd, device='cpu')
+            self.poison_label = clipbkd_label.item()
+
         for idx in range(len(dataset)):
             img, label = dataset[idx]
             if idx in self.poison_indices_set:
-                img = self.poison_dict[self.poison_type](img.clone())
+                if self.poison_type == 'clipbkd':
+                    img = clipbkd_img[0].clone()
+                else:
+                    img = self.poison_dict[self.poison_type](img.clone())
                 label = self.poison_label
 
             self.prepared_data.append((img, label))
@@ -86,7 +96,6 @@ class PoisonedDataset(Dataset):
             if 0 <= x < H and 0 <= y < W:
                 img[0, x, y] = self.poison_col[0]
         return img
-
 
     def __len__(self):
         return len(self.dataset)
@@ -600,7 +609,16 @@ def main():
         
     
     # Train Model
-    poisoned_train = PoisonedDataset(train_ds, args.n_poisons, test_params)
+    # poisoned_train = PoisonedDataset(train_ds, args.n_poisons, test_params)
+    pretrained_model = None
+    if args.poison == 'clipbkd' and args.pretrained_fp:
+        pretrained_model = CNN(args.dataset).to('cpu')
+        pretrained_model.load_state_dict(torch.load(args.pretrained_fp, map_location='cpu'))
+        pretrained_model.eval()
+
+    poisoned_train = PoisonedDataset(train_ds, args.n_poisons, test_params, model_for_clipbkd=pretrained_model)
+
+
     train_loader = DataLoader(poisoned_train, batch_size=args.batch_size, shuffle=True, num_workers=8)
     
     model = CNN(args.dataset).to(device)
