@@ -51,16 +51,22 @@ class PoisonedDataset(Dataset):
         self.poison_indices_set = set(self.poison_indices)
         self.prepared_data = []
 
-        if self.poison_type == 'clipbkd': # model_for_clipbkd cannot be None!!!
+        if self.poison_type == 'clipbkd': # model_for_clipbkd cannot be None!
             target_imgs = torch.stack([self.dataset[i][0] for i in self.clean_indices])
             clipbkd_img, clipbkd_label = craft_clipbkd(target_imgs, model_for_clipbkd, device='cpu')
             self.poison_label = clipbkd_label.item()
+        elif self.poison_type == 'blank':
+            blank_img, _ = self.dataset[0]
+            blank_img = torch.zeros_like(blank_img)
+            self.blank_img = blank_img
 
         for idx in range(len(dataset)):
             img, label = dataset[idx]
             if idx in self.poison_indices_set:
                 if self.poison_type == 'clipbkd':
                     img = clipbkd_img[0].clone()
+                elif self.poison_type == 'blank':
+                    img = self.blank_img.clone()
                 else:
                     img = self.poison_dict[self.poison_type](img.clone())
                 label = self.poison_label
@@ -568,7 +574,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='mnist', help='(mnist, cifar10, cifar100)')
     parser.add_argument('--scoring_fn', type=str, default='madry_compute_corr')
-    parser.add_argument('--poison', type=str, default='pixel', help='(pixel, pattern, ell)')
+    parser.add_argument('--poison', type=str, default='pixel', help='(pixel, pattern, ell, clipbkd, blank)')
     parser.add_argument('--n_poisons', type=int, default=500)
     parser.add_argument('--batch_size', type=int, default=4096) # stole from bb
     parser.add_argument('--lr', type=float, default=1.33e-4, help='learning rate') # stole from bb
